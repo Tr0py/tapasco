@@ -120,6 +120,56 @@ namespace eval platform {
     return $axi_pcie3_0
   }
 
+  # Checks if the optional register slice given by the name is enabled (based on regslice feature and default value)
+  proc is_regslice_enabled {name default} {
+    if {[tapasco::is_feature_enabled "Regslice"]} {
+      set regslices [tapasco::get_feature "Regslice"]
+      if  {[dict exists $regslices $name]} {
+          return [dict get $regslices $name]
+        } else {
+          return $default
+        }
+    } else {
+      return $default
+    }
+  }
+
+  # Inserts a new register slice between given master and slave (for SLR crossing)
+  proc insert_regslice {name default master slave clock reset subsystem} {
+    if {[is_regslice_enabled $name $default]} {
+      set regslice [tapasco::ip::create_axi_reg_slice $subsystem/regslice_${name}]
+      set_property -dict [list CONFIG.REG_AW {15} CONFIG.REG_AR {15} CONFIG.REG_W {15} CONFIG.REG_R {15} CONFIG.REG_B {15} CONFIG.USE_AUTOPIPELINING {1}] $regslice
+      delete_bd_objs [get_bd_intf_nets -of_objects [get_bd_intf_pins $master]]
+      connect_bd_intf_net [get_bd_intf_pins $master] [get_bd_intf_pins $regslice/S_AXI]
+      connect_bd_intf_net [get_bd_intf_pins $regslice/M_AXI] [get_bd_intf_pins $slave]
+      connect_bd_net [get_bd_pins $clock] [get_bd_pins $regslice/aclk]
+      connect_bd_net [get_bd_pins $reset] [get_bd_pins $regslice/aresetn]
+    }
+  }
+
+  proc insert_regslices {} {
+    insert_regslice "dma_migic" false "/memory/dma/m32_axi" "/memory/mig_ic/S00_AXI" "/memory/mem_clk" "/memory/mem_peripheral_aresetn" "/memory"
+    insert_regslice "host_memctrl" true "/host/M_MEM_CTRL" "/memory/S_MEM_CTRL" "/clocks_and_resets/mem_clk" "/clocks_and_resets/mem_interconnect_aresetn" ""
+    insert_regslice "arch_mem" false "/arch/M_MEM_0" "/memory/S_MEM_0" "/clocks_and_resets/design_clk" "/clocks_and_resets/design_interconnect_aresetn" ""
+    insert_regslice "host_dma" true "/host/M_DMA" "/memory/S_DMA" "/clocks_and_resets/host_clk" "/clocks_and_resets/host_interconnect_aresetn" ""
+    insert_regslice "dma_host" true "/memory/M_HOST" "/host/S_HOST" "/clocks_and_resets/host_clk" "/clocks_and_resets/host_interconnect_aresetn" ""
+    insert_regslice "host_arch" true "/host/M_ARCH" "/arch/S_ARCH" "/clocks_and_resets/design_clk" "/clocks_and_resets/design_interconnect_aresetn" ""
+    insert_regslice "l2_cache" [tapasco::is_feature_enabled "Cache"] "/memory/cache_l2_0/M0_AXI" "/memory/mig/C0_DDR4_S_AXI" "/clocks_and_resets/mem_clk" "/clocks_and_resets/mem_peripheral_aresetn" "/memory"
+
+    insert_regslice "host_mmu" [tapasco::is_feature_enabled "SVM"] "/host/M_MMU" "/memory/S_MMU" "/clocks_and_resets/host_clk" "/clocks_and_resets/host_interconnect_aresetn" ""
+
+    if {[is_regslice_enabled "pe" false]} {
+      set ips [get_bd_cells /arch/target_ip_*]
+      foreach ip $ips {
+        set masters [tapasco::get_aximm_interfaces $ip]
+        foreach master $masters {
+          set slave [get_bd_intf_pins -filter {MODE == Slave} -of_objects [get_bd_intf_nets -of_objects $master]]
+          insert_regslice [get_property NAME $ip] true $master $slave "/arch/design_clk" "/arch/design_interconnect_aresetn" "/arch"
+        }
+      }
+    }
+  }
+
     namespace eval AU250 {
         namespace export addressmap
 
@@ -131,4 +181,6 @@ namespace eval platform {
 
 
     tapasco::register_plugin "platform::AU250::addressmap" "post-address-map"
+
+    tapasco::register_plugin "platform::insert_regslices" "post-platform"
 }
